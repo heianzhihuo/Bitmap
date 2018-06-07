@@ -94,11 +94,36 @@ Bitmap c0_or(Bitmap bmpa, Bitmap bmpb)
 	return result;
 }
 
+/*对未压缩的bitmap进行and，生成未压缩的bitmap*/
+Bitmap c00_and(Bitmap bmp1, Bitmap bmp2)
+{
+	Bitmap result = makeBitmap();
+	word_t i, j, wi, wj;
+	setBitmapSpace(result, bmp1->m_size);
+	for (i = 0; i < bmp1->m_size; i++)
+		result->m_vec[i] = bmp1->m_vec[i] & bmp2->m_vec[i];
+	result->active.nbits = bmp1->active.nbits;
+	result->active.val = bmp1->active.val & bmp1->active.val;
+	return result;
+}
+
+/*对未压缩的bitmap进行or，生成未压缩的bitmap*/
+Bitmap c00_or(Bitmap bmp1, Bitmap bmp2)
+{
+	Bitmap result = makeBitmap();
+	word_t i, j, wi, wj;
+	setBitmapSpace(result, bmp1->m_size);
+	for (i = 0; i < bmp1->m_size; i++)
+		result->m_vec[i] = bmp1->m_vec[i] | bmp2->m_vec[i];
+	result->active.nbits = bmp1->active.nbits;
+	result->active.val = bmp1->active.val | bmp1->active.val;
+	return result;
+}
+
 /*对两个压缩的bmp进行and，需要对bmp进行对齐*/
 Bitmap c2_and(Bitmap bmpa, Bitmap bmpb)
 {
 	Bitmap result = makeBitmap();
-	Bitmap tmp = makeBitmap();
 	word_t xi = 0, yi = 0;
 	word_t x, y;
 	word_t headx,heady;
@@ -107,7 +132,8 @@ Bitmap c2_and(Bitmap bmpa, Bitmap bmpb)
 	{
 		if (countx == 0)
 		{
-			if (xi >= bmpa->m_size) break;
+			if (xi >= bmpa->m_size) 
+				break;
 			x = bmpa->m_vec[xi];
 			headx = x >> 30;
 			countx = (~HEADER_1F)& x;
@@ -115,7 +141,8 @@ Bitmap c2_and(Bitmap bmpa, Bitmap bmpb)
 		}
 		if (county == 0)
 		{
-			if (yi >= bmpb->m_size) break;
+			if (yi >= bmpb->m_size) 
+				break;
 			y = bmpb->m_vec[yi];
 			heady = y >> 30;
 			county = (~HEADER_1F)& y;
@@ -171,6 +198,7 @@ Bitmap c2_and(Bitmap bmpa, Bitmap bmpb)
 		result->active.val = bmpa->active.val & bmpb->active.val;
 		result->active.nbits = bmpa->active.nbits;
 	}
+	result->isCompressed = true;
 	return result;
 }
 
@@ -253,10 +281,45 @@ Bitmap c2_or(Bitmap bmpa, Bitmap bmpb)
 	return result;
 }
 
+/*判断两个bmp是否相等*/
+bool isEqual(Bitmap bmp1, Bitmap bmp2)
+{
+	word_t i;
+	if (bmp1->m_size != bmp2->m_size ||
+		bmp1->active.nbits != bmp2->active.nbits ||
+		bmp1->active.val != bmp2->active.val)
+		return false;
+	for (i = 0; i < bmp1->m_size; i++)
+		if (bmp1->m_vec[i] != bmp2->m_vec[i])
+			return false;
+	return true;
+}
+
+
+/*统计位数*/
+word_t do_cnt(Bitmap bmp)
+{
+	word_t cnt = 0,w;
+	word_t i;
+	for (i = 0; i < bmp->m_size; i++)
+	{
+		w = bmp->m_vec[i];
+		if (w > ALLONES)
+			cnt += (w & (~HEADER_1F))*MAXBITS;
+		else
+			cnt += MAXBITS;
+	}
+	return cnt + bmp->active.nbits;
+}
+
 /*计算bitmap中的有效位数*/
 word_t bitmapSize(Bitmap bmp)
 {
-	return bmp->nbits + bmp->active.nbits;
+	word_t sz = bmp->nbits + bmp->active.nbits;
+	word_t sr = do_cnt(bmp);
+	if (sz != sr)
+		printf("WARN:%d,%d\n", sz, sr);
+	return sz<sr?sz:sr;
 }
 
 /*对bitmap进行WAH压缩*/
@@ -264,6 +327,7 @@ void compress(Bitmap bmp)
 {
 	word_t *tmp;//压缩时数据临时存放处
 	tmp = (word_t *)palloc(sizeof(word_t)*bmp->m_size);
+	memset(tmp, 0, sizeof(word_t)*bmp->m_size);
 	word_t i,j;//i,j分别是当前数组的和新的数组正在处理的word的下标
 	word_t w;//w是旧的word
 	int headi, headj;//headi,当前正在处理的head,headj,上一次处理的
@@ -291,11 +355,9 @@ void compress(Bitmap bmp)
 		}
 		else
 		{
-			if (headi == headj)
-			{
+			if (headi == headj && headj>1)
 				//类型相同
-				tmp[j] += w & (~HEADER_1F);
-			}
+				tmp[j-1] += w & (~HEADER_1F);
 			else
 			{
 				tmp[j] = w;
@@ -387,10 +449,7 @@ Bitmap makeBitmap()
 	return bmp;
 }
 
-/*当active word为空时，添加一个counter为cnt的val-fill
- * 即，添加cnt个val-fill
- * val必须是0或者1
- */
+/*当active word为空时，添加一个counter为cnt的val-fill,即，添加cnt个val-fill,val必须是0或者1*/
 void appendCounter(Bitmap bmp, int val, word_t cnt)
 {
 	word_t head = 2 + val;
@@ -408,11 +467,7 @@ void appendCounter(Bitmap bmp, int val, word_t cnt)
 	bmp->nbits += cnt * MAXBITS;//增加位数
 }
 
-/* 
- * 将满31位的active word添加到bitmap中,
- * 同时清空active word
- * active word是未压缩的
- */
+/*将满31位的active word添加到bitmap中,同时清空active word,active word是未压缩的*/
 void appendActive(Bitmap bmp)
 {
 	word_t w = bmp->active.val;
@@ -573,10 +628,7 @@ void appendWord(Bitmap bmp, word_t w)
 	}
 }
 
-/*
- * 向bitmap中添加n个0或者1
- * val必须是1或者0
- */
+/*向bitmap中添加n个0或者1,val必须是1或者0*/
 void appendBits(Bitmap bmp, word_t val, word_t n)
 {
 	if (n == 0) return;
@@ -618,25 +670,78 @@ void appendOneBit(Bitmap bmp, word_t val)
 		appendActive(bmp);
 }
 
-/*
- * 给bitmap的栈分配存储空间
- * size表示word数
- */
+/*给bitmap的栈分配存储空间,size表示word数*/
 void setBitmapSpace(Bitmap bmp, word_t size)
 {
+	if (bmp->m_vec)
+		pfree(bmp->m_vec);
 	bmp->m_vec = (word_t *)palloc(size * sizeof(word_t));
 	memset(bmp->m_vec, 0, size * sizeof(word_t));
 }
 
-/*
- * 扩大一个bitmap的存储空间，
- * 并将原数据复制到新的空间中
- * 同时释放原有空间
- */
+/*扩大一个bitmap的存储空间，并将原数据复制到新的空间中,同时释放原有空间*/
 void resetBitmapSpace(Bitmap bmp, word_t size)
 {
 	word_t *w = (word_t *)palloc(size * sizeof(word_t));
 	memcpy(w, bmp->m_vec, bmp->m_size * sizeof(word_t));
 	free(bmp->m_vec);
 	bmp->m_vec = w;
+}
+
+/*将未压缩的bmp的第nbit位设为1,nbit从0开始数*/
+void setBitBitmap(Bitmap bmp, word_t nbit)
+{
+	if (!bmp->isCompressed && nbit<bitmapSize(bmp))
+	{
+		word_t nw = nbit / MAXBITS;
+		int bit = nbit%MAXBITS;//在32位的组中，除最高位从左往右第bit位
+		if (nw < bmp->m_size)
+			bmp->m_vec[nw] |= (1 << (MAXBITS - bit - 1));
+		else
+			bmp->active.val |= (1 << (bmp->active.nbits - bit - 1));
+	}
+}
+
+/*将未压缩的bmp的第nbit位设为0,nbit从0开始计数*/
+void setBitZBitmap(Bitmap bmp, word_t nbit)
+{
+	if (!bmp->isCompressed && nbit<bitmapSize(bmp))
+	{
+		word_t nw = nbit / MAXBITS;
+		int bit = nbit%MAXBITS;//在32位的组中，除最高位从左往右第bit位
+		word_t w = 1 << (31 - bit);
+		if (nw < bmp->m_size)
+			bmp->m_vec[nw] &= ~(1 << (31 - bit));
+		else
+			bmp->active.val &= ~(1 << (bmp->active.nbits - bit - 1));
+	}
+}
+
+/*生成随机的位图,总位数为nb,位密集度为density*/
+void randBitmap(Bitmap bmp, word_t nb, double density)
+{
+	if (nb > 0 && density < 1)
+	{
+		srand(time(0));
+		word_t nc = nb*density;//1的位数
+		word_t nw = nb / MAXBITS;//需要的字节数
+		word_t i=0,cnt = 0;
+		setBitmapSpace(bmp, nw);
+		bmp->nbits = nw*MAXBITS;
+		bmp->m_size = nw;
+		bmp->active.nbits = nb%MAXBITS;
+		bmp->active.val = 0;
+		bmp->isCompressed = false;
+		while (cnt<nc)
+		{
+			if (rand() < RAND_MAX*density)
+			{
+				setBitBitmap(bmp, i);
+				cnt++;
+			}
+			i++;
+			if (i >= nb)//知道生成足够多的1
+				i=i^i;
+		}
+	}
 }
